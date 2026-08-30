@@ -1,0 +1,110 @@
+substitutions:
+  devicename: intercom-b
+  friendly_name: "Intercom B"
+
+esphome:
+  name: ${devicename}
+  friendly_name: ${friendly_name}
+
+packages:
+  common: !include common.yaml
+
+api:
+  encryption:
+    key: !secret api_key_b
+
+output:
+  - platform: gpio
+    id: ringing_led_out
+    pin: GPIO4
+  - platform: gpio
+    id: call_active_led_out
+    pin: GPIO5
+  - platform: gpio
+    id: amp_enable
+    pin: GPIO14
+
+light:
+  # Lit while the global state is "ringing" — controlled 100% by HA, since B
+  # has no way to know on its own that the outdoor doorbell was pressed.
+  - platform: binary
+    output: ringing_led_out
+    id: ringing_led
+    name: "Ringing LED"
+
+  # Also controlled by HA (turned on together with the audio_enabled switch
+  # on the HA side) — the module never lights this up on its own.
+  - platform: binary
+    output: call_active_led_out
+    id: call_active_led
+    name: "Call Active LED"
+
+binary_sensor:
+  # Two buttons, two raw events sent to HA. The module doesn't know whether
+  # "answer" means joining or leaving the call — that's decided by the
+  # generic script intercom_toggle_module (module: "b"), in the HA package.
+  - platform: gpio
+    id: answer_button
+    name: "Answer Hangup Button"
+    pin:
+      number: GPIO18
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    filters:
+      - delayed_on: 30ms
+      - delayed_off: 30ms
+
+  - platform: gpio
+    id: open_gate_button
+    name: "Open Gate Button"
+    pin:
+      number: GPIO19
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    filters:
+      - delayed_on: 30ms
+      - delayed_off: 30ms
+
+switch:
+  - platform: template
+    id: audio_enabled
+    name: "Audio Active"
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - lambda: |
+          id(intercom_remote_b).set_session_active(true);
+    turn_off_action:
+      - lambda: |
+          id(intercom_remote_b).set_session_active(false);
+
+  - platform: template
+    id: ring_local
+    name: "Local Chime"
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - lambda: |
+          id(intercom_remote_b).ring();
+      - delay: 1500ms
+      - switch.turn_off: ring_local
+
+intercom_remote:
+  id: intercom_remote_b
+  endpoint: "B"
+  microphone_pin: 35
+  dac_pin: 26
+  gateway_host: !secret intercom_gateway_ip
+  gateway_port: 6055
+  sample_rate: 8000
+  frame_ms: 20
+  mic_bias_mv: 1650
+  input_gain: 3.0
+  output_gain: 0.70
+  amp_enable: amp_enable
+  amp_warmup_ms: 10
+  amp_idle_timeout_ms: 400

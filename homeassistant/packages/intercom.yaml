@@ -1,0 +1,372 @@
+# ---------------------------------------------------------------------------
+# State machine for the Smart Intercom via Home Assistant — multi-module version.
+#
+# "in_call" doesn't mean "only B is in the call". Each internal module (B,
+# C, D...) has its own "_in_call" input_boolean and can join/leave the call
+# independently, at any point after ringing starts. The intercom only goes
+# back to "idle" once NO participant (no internal module AND the digital
+# pickup) is in the call anymore.
+#
+# To add a new module (e.g. "D"), copy the block marked "PER-MODULE
+# PATTERN" below, swapping b -> d (or whatever letter you use), and add a
+# new intercom_d.yaml in ESPHome with endpoint: "D". Nothing else in this
+# package needs to change — the generic scripts
+# (intercom_toggle_module / intercom_check_hangup) enumerate modules
+# dynamically via an entity_id pattern, not a fixed list.
+# ---------------------------------------------------------------------------
+
+input_select:
+  intercom_state:
+    name: Intercom State
+    options: [idle, ringing, in_call]
+    initial: idle
+
+input_number:
+  intercom_ring_seconds:
+    name: Ring duration (s)
+    min: 5
+    max: 120
+    step: 5
+    initial: 20
+  intercom_missed_timeout_minutes:
+    name: Missed call timeout (min)
+    min: 1
+    max: 15
+    step: 1
+    initial: 5
+
+input_boolean:
+  intercom_browser_connected:
+    name: Browser connected to intercom
+
+  # --- One per internal module. PER-MODULE PATTERN (part 1/1 in this section). ---
+  intercom_b_in_call:
+    name: Intercom B is in the call
+  intercom_c_in_call:
+    name: Intercom C is in the call
+
+  # Digital pickup (card/app) — same "in the call" concept, kept separate
+  # from the physical modules because it has no hardware button.
+  intercom_digital_in_call:
+    name: Digital pickup is in the call
+
+script:
+  intercom_start_ring:
+    alias: Intercom - start call
+    sequence:
+      - condition: state
+        entity_id: input_select.intercom_state
+        state: idle
+      - service: input_select.select_option
+        target: {entity_id: input_select.intercom_state}
+        data: {option: ringing}
+      # Clears any leftover participant from a previous call, without
+      # needing to list every input_boolean by hand.
+      - service: input_boolean.turn_off
+        target:
+          entity_id: >
+            {{ states.input_boolean
+               | selectattr('entity_id','search','^input_boolean\.intercom_.*_in_call$')
+               | map(attribute='entity_id') | list }}
+      - service: switch.turn_on
+        target: {entity_id: switch.intercom_b_local_chime}
+
+  # Called whenever ANY internal module presses its answer button. Receives
+  # "module" (e.g. "b", "c") and decides on its own whether this is joining
+  # or leaving the call, without needing one script per module.
+  intercom_toggle_module:
+    alias: Intercom - toggle a module's participation
+    fields:
+      module:
+        description: "Module letter, lowercase, e.g. 'b', 'c'"
+        required: true
+    variables:
+      audio_switch: "switch.intercom_{{ module }}_audio_active"
+      in_call_bool: "input_boolean.intercom_{{ module }}_in_call"
+    sequence:
+      - choose:
+          # Module isn't in the call yet, and there's a call ringing/ongoing
+          # to join: join it.
+          - conditions:
+              - condition: state
+                entity_id: "{{ in_call_bool }}"
+                state: "off"
+              - condition: state
+                entity_id: input_select.intercom_state
+                state: ["ringing", "in_call"]
+            sequence:
+              - service: switch.turn_on
+                target: {entity_id: switch.intercom_a_audio_active}
+              - service: switch.turn_on
+                target: {entity_id: "{{ audio_switch }}"}
+              - service: input_boolean.turn_on
+                target: {entity_id: "{{ in_call_bool }}"}
+              - service: input_select.select_option
+                target: {entity_id: input_select.intercom_state}
+                data: {option: in_call}
+
+          # Module is already in the call: leave it. If it was the last
+          # participant, intercom_check_hangup ends the call for everyone.
+          - conditions:
+              - condition: state
+                entity_id: "{{ in_call_bool }}"
+                state: "on"
+            sequence:
+              - service: switch.turn_off
+                target: {entity_id: "{{ audio_switch }}"}
+              - service: input_boolean.turn_off
+                target: {entity_id: "{{ in_call_bool }}"}
+              - service: script.intercom_check_hangup
+
+  # Single place that decides whether the call should end for good: only
+  # once no internal module AND the digital pickup are still marked "in the
+  # call". Called after any participant leaves (physical module or digital).
+  intercom_check_hangup:
+    alias: Intercom - check whether to hang up
+    sequence:
+      - condition: template
+        value_template: >
+          {{ (states.input_boolean
+              | selectattr('entity_id','search','^input_boolean\.intercom_.*_in_call$')
+              | selectattr('state','eq','on')
+              | list | count) == 0 }}
+      - service: switch.turn_off
+        target: {entity_id: switch.intercom_a_audio_active}
+      - service: input_select.select_option
+        target: {entity_id: input_select.intercom_state}
+        data: {option: idle}
+
+  intercom_answer_digital:
+    alias: Intercom - answer in HA (digital)
+    sequence:
+      - condition: state
+        entity_id: input_select.intercom_state
+        state: ["ringing", "in_call"]
+      - service: switch.turn_on
+        target: {entity_id: switch.intercom_a_audio_active}
+      - service: input_boolean.turn_on
+        target: {entity_id: input_boolean.intercom_digital_in_call}
+      - service: input_select.select_option
+        target: {entity_id: input_select.intercom_state}
+        data: {option: in_call}
+
+  intercom_hangup:
+    alias: Intercom - hang up (only the digital participant leaves)
+    sequence:
+      - service: input_boolean.turn_off
+        target: {entity_id: input_boolean.intercom_digital_in_call}
+      - service: script.intercom_check_hangup
+
+  intercom_hangup_all:
+    alias: Intercom - hang up for everyone (force-end the call)
+    sequence:
+      - service: input_boolean.turn_off
+        target:
+          entity_id: >
+            {{ states.input_boolean
+               | selectattr('entity_id','search','^input_boolean\.intercom_.*_in_call$')
+               | map(attribute='entity_id') | list }}
+      - service: switch.turn_off
+        target:
+          entity_id: >
+            {{ states.switch
+               | selectattr('entity_id','search','^switch\.intercom_[a-z]_audio_active$')
+               | map(attribute='entity_id') | list }}
+      - service: input_select.select_option
+        target: {entity_id: input_select.intercom_state}
+        data: {option: idle}
+
+  intercom_open_gate:
+    alias: Intercom - open gate
+    sequence:
+      - service: switch.turn_on
+        target: {entity_id: switch.intercom_a_open_gate}
+
+automation:
+  # Each internal module's "Call Active" LED follows that module's actual
+  # audio_active switch, not the higher-level "_in_call" input_boolean.
+  # They're always toggled together by intercom_toggle_module /
+  # intercom_check_hangup / intercom_hangup_all in normal operation, but
+  # binding the LED to the input_boolean instead of the real switch would
+  # mean a direct service call to switch.intercom_<x>_audio_active (from
+  # another automation, a script, or the HA UI) could turn a module's mic on
+  # with no physical indication at all. Following the switch itself makes
+  # the LED an honest reflection of "is this microphone live right now",
+  # regardless of how it got turned on.
+  #
+  # PER-MODULE PATTERN — duplicate this block per internal module, swapping
+  # "b"/"B" for the matching letter.
+  - alias: Intercom - call active LED (B) follows mic state
+    trigger:
+      - platform: state
+        entity_id: switch.intercom_b_audio_active
+    action:
+      - service: >
+          {{ 'light.turn_on' if trigger.to_state.state == 'on' else 'light.turn_off' }}
+        target: {entity_id: light.intercom_b_call_active_led}
+
+  - alias: Intercom - call active LED (C) follows mic state
+    trigger:
+      - platform: state
+        entity_id: switch.intercom_c_audio_active
+    action:
+      - service: >
+          {{ 'light.turn_on' if trigger.to_state.state == 'on' else 'light.turn_off' }}
+        target: {entity_id: light.intercom_c_call_active_led}
+  # --- end of per-module pattern (LED) ---
+
+  - alias: Intercom - button A calls
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.intercom_a_call_button
+        to: "on"
+    action:
+      - service: script.intercom_start_ring
+
+  # PER-MODULE PATTERN — duplicate per internal module. This is the only
+  # automation that references each module's physical binary_sensor; the
+  # join/leave logic itself all lives in intercom_toggle_module.
+  - alias: Intercom - button B answers or leaves the call
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.intercom_b_answer_hangup_button
+        to: "on"
+    action:
+      - service: script.intercom_toggle_module
+        data: {module: "b"}
+
+  - alias: Intercom - button C answers or leaves the call
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.intercom_c_answer_hangup_button
+        to: "on"
+    action:
+      - service: script.intercom_toggle_module
+        data: {module: "c"}
+  # --- end of per-module pattern (answer button) ---
+
+  - alias: Intercom - button B opens gate
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.intercom_b_open_gate_button
+        to: "on"
+    action:
+      - service: script.intercom_open_gate
+
+  - alias: Intercom - button C opens gate
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.intercom_c_open_gate_button
+        to: "on"
+    action:
+      - service: script.intercom_open_gate
+
+  # Ringing LED follows the global "ringing" state — handled here because
+  # no internal module knows on its own that the outdoor doorbell rang.
+  # PER-MODULE PATTERN — duplicate the service target for each module, or
+  # replace with an entity_id list if you prefer a single block.
+  - alias: Intercom - ringing LED follows state
+    trigger:
+      - platform: state
+        entity_id: input_select.intercom_state
+    action:
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: input_select.intercom_state
+                state: ringing
+            sequence:
+              - service: light.turn_on
+                target:
+                  entity_id:
+                    - light.intercom_b_ringing_led
+                    - light.intercom_c_ringing_led
+        default:
+          - service: light.turn_off
+            target:
+              entity_id:
+                - light.intercom_b_ringing_led
+                - light.intercom_c_ringing_led
+
+  # Repeats the local chime on ALL internal modules while the state stays
+  # "ringing", up to intercom_ring_seconds or until someone joins the call
+  # (which changes the state to in_call and stops the "while" loop).
+  - alias: Intercom - repeat chime while ringing
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id: input_select.intercom_state
+        to: ringing
+    action:
+      - repeat:
+          while:
+            - condition: state
+              entity_id: input_select.intercom_state
+              state: ringing
+            - condition: template
+              value_template: >
+                {{ (repeat.index * 2) <= states('input_number.intercom_ring_seconds') | int(20) }}
+          sequence:
+            - delay: 2s
+            - condition: state
+              entity_id: input_select.intercom_state
+              state: ringing
+            - service: switch.turn_on
+              target:
+                entity_id:
+                  - switch.intercom_b_local_chime
+                  - switch.intercom_c_local_chime
+
+  # Missed call: nobody joined within the configured time.
+  - alias: Intercom - missed call
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: input_select.intercom_state
+        to: ringing
+        for:
+          minutes: "{{ states('input_number.intercom_missed_timeout_minutes') | int(5) }}"
+    action:
+      - event: intercom_missed_call
+        event_data:
+          timestamp: "{{ now().isoformat() }}"
+      - service: switch.turn_off
+        target:
+          entity_id:
+            - switch.intercom_b_local_chime
+            - switch.intercom_c_local_chime
+      - service: input_select.select_option
+        target: {entity_id: input_select.intercom_state}
+        data: {option: idle}
+
+  # Example consumer of the event above — adjust for your real notification
+  # target (mobile_app, Alexa Media Player, etc). Left commented out as a
+  # starting point.
+  # - alias: Intercom - notify missed call
+  #   trigger:
+  #     - platform: event
+  #       event_type: intercom_missed_call
+  #   action:
+  #     - service: notify.mobile_app_your_phone
+  #       data:
+  #         message: "Nobody answered the door"
+  #         data:
+  #           push:
+  #             interruption-level: critical
+
+  # Notifies as soon as the doorbell rings (doesn't wait for the missed-call
+  # timeout) — this is where a critical push / Alexa announce would go.
+  # - alias: Intercom - notify doorbell ringing
+  #   trigger:
+  #     - platform: state
+  #       entity_id: input_select.intercom_state
+  #       to: ringing
+  #   action:
+  #     - service: notify.mobile_app_your_phone
+  #       data:
+  #         message: "Someone rang the doorbell"

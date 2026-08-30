@@ -1,0 +1,101 @@
+substitutions:
+  devicename: intercom-a
+  friendly_name: "Intercom A"
+
+esphome:
+  name: ${devicename}
+  friendly_name: ${friendly_name}
+
+packages:
+  common: !include common.yaml
+
+api:
+  encryption:
+    key: !secret api_key_a
+
+output:
+  # GPIO wired to the BD137 base (via a 330R resistor) — power-gate for the LM386.
+  - platform: gpio
+    id: amp_enable
+    pin: GPIO14
+
+  # GPIO wired to PT11 — gate lock trigger pulse (same point as on the factory board).
+  - platform: gpio
+    id: gate_trigger
+    pin: GPIO27
+
+binary_sensor:
+  # The module only reports the button event to HA — it doesn't decide
+  # anything on its own (it doesn't ring remotely, doesn't open an audio
+  # session). Whoever interprets "button A pressed = start a call" is the HA
+  # script intercom_start_ring, in homeassistant/packages/intercom.yaml.
+  - platform: gpio
+    id: call_button
+    name: "Call Button"
+    pin:
+      number: GPIO18
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    filters:
+      - delayed_on: 30ms
+      - delayed_off: 30ms
+
+switch:
+  # Only audio control that exists here: opens/closes the session. Only HA triggers it.
+  - platform: template
+    id: audio_enabled
+    name: "Audio Active"
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - lambda: |
+          id(intercom_remote_a).set_session_active(true);
+    turn_off_action:
+      - lambda: |
+          id(intercom_remote_a).set_session_active(false);
+
+  # Local chime: a simple sound effect, doesn't depend on the session or on
+  # HA being online — it only plays the "ding" locally. HA triggers this
+  # remotely whenever it wants to confirm the ring, but the device could
+  # also trigger it on its own someday if needed (e.g. offline fallback).
+  - platform: template
+    id: ring_local
+    name: "Local Chime"
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - lambda: |
+          id(intercom_remote_a).ring();
+      - delay: 1500ms
+      - switch.turn_off: ring_local
+
+  # Gate lock pulse. Duration/active level already validated on the
+  # original board — see docs/HARDWARE.md.
+  - platform: template
+    id: open_gate
+    name: "Open Gate"
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - output.turn_on: gate_trigger
+      - delay: 500ms
+      - output.turn_off: gate_trigger
+      - switch.turn_off: open_gate
+
+intercom_remote:
+  id: intercom_remote_a
+  endpoint: "A"
+  microphone_pin: 34
+  dac_pin: 25
+  gateway_host: !secret intercom_gateway_ip
+  gateway_port: 6055
+  sample_rate: 8000
+  frame_ms: 20
+  mic_bias_mv: 1650
+  input_gain: 3.0
+  output_gain: 0.70
+  amp_enable: amp_enable
+  amp_warmup_ms: 10
+  amp_idle_timeout_ms: 400
