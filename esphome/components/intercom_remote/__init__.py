@@ -2,6 +2,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import output
 from esphome.const import CONF_ID
+from esphome.core import CORE
 
 CODEOWNERS = []
 DEPENDENCIES = ["wifi", "esp32"]
@@ -27,12 +28,17 @@ CONF_DAC_PIN = "dac_pin"
 # capture/playback. All the audio intelligence (when to talk, echo, noise)
 # lives on the central gateway. See the project README.
 
+
+def validate_uppercase(value):
+    return cv.string_strict(value).upper()
+
+
 CONFIG_SCHEMA = cv.Schema({
     cv.GenerateID(): cv.declare_id(IntercomRemote),
     # "A" is always the outdoor module. Internal modules use B, C, D... — one
     # letter per physical module, with no practical limit beyond the
     # alphabet (and the UDP port scheme, see server.py: port = 6056 + (letter - 'A')).
-    cv.Required(CONF_ENDPOINT): cv.All(cv.string, cv.Length(min=1, max=1), cv.upper),
+    cv.Required(CONF_ENDPOINT): cv.All(cv.string, cv.Length(min=1, max=1), validate_uppercase),
     cv.Required(CONF_MICROPHONE_PIN): cv.int_range(min=32, max=39),
     cv.Required(CONF_DAC_PIN): cv.one_of(25, 26, int=True),
     cv.Required(CONF_GATEWAY_HOST): cv.string,
@@ -49,6 +55,15 @@ CONFIG_SCHEMA = cv.Schema({
 
 
 async def to_code(config):
+    # ESPHome 2026.2.0+ disables Arduino libraries by default on ESP32
+    # Arduino builds — this component uses WiFi/WiFiUdp directly (see
+    # intercom_remote.cpp), so they must be re-enabled explicitly or the
+    # build fails with "WiFiUdp.h: No such file or directory" even though
+    # the file exists in the managed arduino-esp32 component.
+    if CORE.is_esp32 and CORE.using_arduino:
+        cg.add_library("WiFi", None)
+        cg.add_library("Network", None)
+
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
 

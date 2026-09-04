@@ -96,10 +96,16 @@ void IntercomRemote::set_session_active(bool on) {
   session_active_ = on;
   if (!on) {
     dacWrite(dac_pin_, 128);
-    void *stale;
-    size_t sz;
-    while ((stale = xRingbufferReceive(rx_ring_, &sz, 0)) != nullptr) {
-      vRingbufferReturnItem(rx_ring_, stale);
+    // rx_ring_ is only created in setup(), which runs at AFTER_WIFI priority
+    // — later than the "Audio Active" switch's own setup(). That switch's
+    // restore_mode: ALWAYS_OFF calls this at boot to enforce the initial
+    // state, before rx_ring_ exists, so it must be guarded here.
+    if (rx_ring_ != nullptr) {
+      void *stale;
+      size_t sz;
+      while ((stale = xRingbufferReceive(rx_ring_, &sz, 0)) != nullptr) {
+        vRingbufferReturnItem(rx_ring_, stale);
+      }
     }
   }
 }
