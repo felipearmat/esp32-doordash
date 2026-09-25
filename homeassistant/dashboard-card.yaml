@@ -1,3 +1,8 @@
 type: custom:intercom-card
-gateway_host: 192.168.1.10   # Home Assistant IP on the LAN
-gateway_port: 8099
+# Recommended: HA served over HTTPS behind a reverse proxy that also forwards
+# the gateway WebSocket (see SETUP.md, "HTTPS and the browser microphone").
+gateway_url: wss://ha.example.com/intercom-ws
+# Without a proxy (plain LAN access — the browser will block the microphone):
+# gateway_host: 192.168.1.10   # Home Assistant IP on the LAN
+# gateway_port: 8099
+# confirm_gate: false          # skip the "Open the gate?" confirmation

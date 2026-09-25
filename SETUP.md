@@ -35,6 +35,12 @@ swapping in the new letter — the generic scripts
 (`intercom_toggle_module`, `intercom_check_hangup`) need no changes at all,
 they enumerate modules dynamically.
 
+**Only the outdoor module (no internal modules)?** Use
+`homeassistant/packages/intercom_single_module.yaml` instead of
+`intercom.yaml`: it keeps module A plus the digital pickup (card/app) and
+drops every B/C reference, which would otherwise log errors for missing
+entities. Don't install both files at the same time.
+
 ## 3. Gateway local add-on
 On Home Assistant OS/Supervised, create `/addons/intercom_gateway/` and copy
 the files from `homeassistant/addons/intercom_gateway/`. Install and start
@@ -52,12 +58,48 @@ Python binding for `libspeexdsp`, then removes those build packages
 afterward (the `speexdsp` shared library itself stays installed to run). If
 the add-on build fails, check the log: `server.py` raises a clear error if
 `import speexdsp` fails, instead of starting in a degraded mode with no
-echo cancellation.
+echo cancellation. The build itself also runs that import as its last step,
+so a broken binding fails the build instead of the running add-on.
+
+`speexdsp==0.1.1` ships an old SWIG wrapper that loads its extension through
+the `imp` module, which was removed in Python 3.12 (the Python in current
+Alpine-based add-on images). The `Dockerfile` patches that single call to a
+plain relative import; without it the add-on crashes at startup with
+`ModuleNotFoundError: No module named 'imp'`.
 
 ## 4. Card
 Copy `homeassistant/www/intercom-card.js` to `/config/www/intercom-card.js`.
 Add the Lovelace resource `/local/intercom-card.js` as a **JavaScript
 Module** and use the YAML from `homeassistant/dashboard-card.yaml`.
+
+### HTTPS and the browser microphone
+Browsers (and the Home Assistant companion app) only allow microphone access
+on secure origins. Opening HA over plain `http://<ip>:8123` shows the card,
+but "Answer" can't capture audio — the card now says so explicitly instead of
+failing silently. Serve HA over HTTPS (any reverse proxy with a valid
+certificate works; a Let's Encrypt certificate via DNS challenge doesn't need
+any port exposed to the internet) and forward the gateway WebSocket through
+the same host, so the page and the audio share one secure origin:
+
+```nginx
+# Nginx / Nginx Proxy Manager ("Advanced" tab of the HA proxy host)
+location /intercom-ws {
+    proxy_pass http://<HA_IP>:8099/ws;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 3600s;
+}
+```
+
+Then set `gateway_url: wss://<your-ha-host>/intercom-ws` in the card. If the
+proxy runs in another container, remember that Home Assistant must list it in
+`http: trusted_proxies`.
+
+The card sends exactly 160 samples (20 ms) of 8 kHz int16 PCM per WebSocket
+message, which is the only frame size `server.py` accepts, and resamples the
+microphone from the device's native rate itself (Firefox refuses to attach a
+microphone to an `AudioContext` created at a different sample rate).
 
 ## 5. Incremental test
 1. A, B, and C online in Home Assistant.

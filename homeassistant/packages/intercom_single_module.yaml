@@ -1,0 +1,171 @@
+# ---------------------------------------------------------------------------
+# Single-module variant: only the outdoor module (A) + the digital pickup
+# (Lovelace card / app). Use this INSTEAD of intercom.yaml when you have no
+# internal modules (B, C...) — intercom.yaml references their entities and
+# would log errors for every missing switch/light.
+#
+# Entity names assume the ESPHome friendly_name "Intercom A"
+# (switch.intercom_a_audio_active, binary_sensor.intercom_a_call_button...).
+# If you renamed the device, adjust the entity ids below.
+# ---------------------------------------------------------------------------
+
+input_select:
+  intercom_state:
+    name: Intercom State
+    options: [idle, ringing, in_call]
+    initial: idle
+
+input_number:
+  intercom_missed_timeout_minutes:
+    name: Missed call timeout (min)
+    min: 1
+    max: 15
+    step: 1
+    initial: 2
+
+input_boolean:
+  # Same "*_in_call" naming as intercom.yaml, so the generic hang-up check
+  # keeps working if internal modules are added later.
+  intercom_digital_in_call:
+    name: Digital pickup is in the call
+
+script:
+  intercom_start_ring:
+    alias: Intercom - start call
+    sequence:
+      - condition: state
+        entity_id: input_select.intercom_state
+        state: idle
+      - service: input_select.select_option
+        target: {entity_id: input_select.intercom_state}
+        data: {option: ringing}
+      - service: input_boolean.turn_off
+        target:
+          entity_id: >
+            {{ states.input_boolean
+               | selectattr('entity_id','search','^input_boolean\.intercom_.*_in_call$')
+               | map(attribute='entity_id') | list }}
+      # Local "ding" at the gate, so the visitor knows the call went through.
+      - service: switch.turn_on
+        target: {entity_id: switch.intercom_a_local_chime}
+
+  intercom_check_hangup:
+    alias: Intercom - check whether to hang up
+    sequence:
+      - condition: template
+        value_template: >
+          {{ (states.input_boolean
+              | selectattr('entity_id','search','^input_boolean\.intercom_.*_in_call$')
+              | selectattr('state','eq','on')
+              | list | count) == 0 }}
+      - service: switch.turn_off
+        target: {entity_id: switch.intercom_a_audio_active}
+      - service: input_select.select_option
+        target: {entity_id: input_select.intercom_state}
+        data: {option: idle}
+
+  intercom_answer_digital:
+    alias: Intercom - answer in HA (digital)
+    sequence:
+      - condition: state
+        entity_id: input_select.intercom_state
+        state: ["ringing", "in_call"]
+      - service: switch.turn_on
+        target: {entity_id: switch.intercom_a_audio_active}
+      - service: input_boolean.turn_on
+        target: {entity_id: input_boolean.intercom_digital_in_call}
+      - service: input_select.select_option
+        target: {entity_id: input_select.intercom_state}
+        data: {option: in_call}
+
+  intercom_hangup:
+    alias: Intercom - hang up (digital)
+    sequence:
+      - service: input_boolean.turn_off
+        target: {entity_id: input_boolean.intercom_digital_in_call}
+      - service: script.intercom_check_hangup
+
+  intercom_hangup_all:
+    alias: Intercom - hang up for everyone (force-end the call)
+    sequence:
+      - service: input_boolean.turn_off
+        target:
+          entity_id: >
+            {{ states.input_boolean
+               | selectattr('entity_id','search','^input_boolean\.intercom_.*_in_call$')
+               | map(attribute='entity_id') | list }}
+      - service: switch.turn_off
+        target: {entity_id: switch.intercom_a_audio_active}
+      - service: input_select.select_option
+        target: {entity_id: input_select.intercom_state}
+        data: {option: idle}
+
+  intercom_open_gate:
+    alias: Intercom - open gate
+    sequence:
+      - service: switch.turn_on
+        target: {entity_id: switch.intercom_a_open_gate}
+
+automation:
+  - id: intercom_button_a_calls
+    alias: Intercom - button A calls
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.intercom_a_call_button
+        to: "on"
+    action:
+      - service: script.intercom_start_ring
+
+  - id: intercom_missed_call
+    alias: Intercom - missed call
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: input_select.intercom_state
+        to: ringing
+        for:
+          minutes: "{{ states('input_number.intercom_missed_timeout_minutes') | int(2) }}"
+    action:
+      - event: intercom_missed_call
+        event_data:
+          timestamp: "{{ now().isoformat() }}"
+      - service: input_select.select_option
+        target: {entity_id: input_select.intercom_state}
+        data: {option: idle}
+
+  # Safety net: if module A's audio is left streaming with nobody in the call
+  # (e.g. HA restarted mid-call), turn it off after a minute.
+  - id: intercom_orphan_audio
+    alias: Intercom - turn off orphaned audio
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: switch.intercom_a_audio_active
+        to: "on"
+        for: {minutes: 1}
+    condition:
+      - condition: state
+        entity_id: input_select.intercom_state
+        state: idle
+    action:
+      - service: switch.turn_off
+        target: {entity_id: switch.intercom_a_audio_active}
+
+  # Push notification when the doorbell rings — replace the notify target
+  # with your own mobile_app device.
+  # - id: intercom_notify_ringing
+  #   alias: Intercom - notify doorbell ringing
+  #   trigger:
+  #     - platform: state
+  #       entity_id: input_select.intercom_state
+  #       to: ringing
+  #   action:
+  #     - service: notify.mobile_app_your_phone
+  #       data:
+  #         title: "Intercom"
+  #         message: "Someone is at the gate"
+  #         data:
+  #           clickAction: /your-intercom-dashboard/0
+  #           priority: high
+  #           ttl: 0

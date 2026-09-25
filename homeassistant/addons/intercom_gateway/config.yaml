@@ -1,5 +1,5 @@
 name: "Intercom Audio Gateway"
-version: "0.1.0"
+version: "0.1.1"
 slug: "intercom_audio_gateway"
 description: "PCM audio router with echo cancellation (speexdsp) for the ESP32 modules and the Home Assistant browser client"
 arch: [amd64, aarch64, armv7, i386]
