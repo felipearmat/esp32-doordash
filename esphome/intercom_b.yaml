@@ -97,7 +97,9 @@ intercom_remote:
   id: intercom_remote_b
   endpoint: "B"
   microphone_pin: 35
-  dac_pin: 26
+  i2s_bclk_pin: 26
+  i2s_lrc_pin: 25
+  i2s_din_pin: 33
   gateway_host: !secret intercom_gateway_ip
   gateway_port: 6055
   sample_rate: 8000

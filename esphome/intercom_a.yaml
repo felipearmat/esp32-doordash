@@ -14,7 +14,8 @@ api:
     key: !secret api_key_a
 
 output:
-  # GPIO wired to the BD137 base (via a 330R resistor) — power-gate for the LM386.
+  # GPIO wired to the MAX98357A's SD (shutdown) pin — power-gate for the amp.
+  # Replaced the old LM386 + BD137 transistor chain entirely; see docs/HARDWARE.md.
   - platform: gpio
     id: amp_enable
     pin: GPIO14
@@ -88,7 +89,9 @@ intercom_remote:
   id: intercom_remote_a
   endpoint: "A"
   microphone_pin: 34
-  dac_pin: 25
+  i2s_bclk_pin: 26
+  i2s_lrc_pin: 25
+  i2s_din_pin: 33
   gateway_host: !secret intercom_gateway_ip
   gateway_port: 6055
   sample_rate: 8000

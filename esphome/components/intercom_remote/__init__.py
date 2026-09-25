@@ -22,11 +22,17 @@ CONF_AMP_ENABLE = "amp_enable"
 CONF_AMP_WARMUP_MS = "amp_warmup_ms"
 CONF_AMP_IDLE_TIMEOUT_MS = "amp_idle_timeout_ms"
 CONF_MICROPHONE_PIN = "microphone_pin"
-CONF_DAC_PIN = "dac_pin"
+CONF_I2S_BCLK_PIN = "i2s_bclk_pin"
+CONF_I2S_LRC_PIN = "i2s_lrc_pin"
+CONF_I2S_DIN_PIN = "i2s_din_pin"
 
-# No duplex_mode, vox_*, nlms_*, i2s_* here — this component only does raw
+# No duplex_mode, vox_*, nlms_* here — this component only does raw
 # capture/playback. All the audio intelligence (when to talk, echo, noise)
 # lives on the central gateway. See the project README.
+#
+# Playback is I2S out to a MAX98357A (replaced the old DAC+LM386 chain —
+# see docs/HARDWARE.md for why). Capture is still the raw analogRead() mic
+# path; only the output side changed.
 
 
 def validate_uppercase(value):
@@ -40,7 +46,9 @@ CONFIG_SCHEMA = cv.Schema({
     # alphabet (and the UDP port scheme, see server.py: port = 6056 + (letter - 'A')).
     cv.Required(CONF_ENDPOINT): cv.All(cv.string, cv.Length(min=1, max=1), validate_uppercase),
     cv.Required(CONF_MICROPHONE_PIN): cv.int_range(min=32, max=39),
-    cv.Required(CONF_DAC_PIN): cv.one_of(25, 26, int=True),
+    cv.Required(CONF_I2S_BCLK_PIN): cv.int_,
+    cv.Required(CONF_I2S_LRC_PIN): cv.int_,
+    cv.Required(CONF_I2S_DIN_PIN): cv.int_,
     cv.Required(CONF_GATEWAY_HOST): cv.string,
     cv.Optional(CONF_GATEWAY_PORT, default=6055): cv.port,
     cv.Optional(CONF_SAMPLE_RATE, default=8000): cv.one_of(8000, 16000, int=True),
@@ -69,7 +77,9 @@ async def to_code(config):
 
     cg.add(var.set_endpoint(config[CONF_ENDPOINT]))
     cg.add(var.set_microphone_pin(config[CONF_MICROPHONE_PIN]))
-    cg.add(var.set_dac_pin(config[CONF_DAC_PIN]))
+    cg.add(var.set_i2s_bclk_pin(config[CONF_I2S_BCLK_PIN]))
+    cg.add(var.set_i2s_lrc_pin(config[CONF_I2S_LRC_PIN]))
+    cg.add(var.set_i2s_din_pin(config[CONF_I2S_DIN_PIN]))
     cg.add(var.set_gateway_host(config[CONF_GATEWAY_HOST]))
     cg.add(var.set_gateway_port(config[CONF_GATEWAY_PORT]))
     cg.add(var.set_sample_rate(config[CONF_SAMPLE_RATE]))

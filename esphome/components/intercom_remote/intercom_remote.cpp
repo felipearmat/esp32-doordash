@@ -3,6 +3,7 @@
 #include <WiFi.h>
 #include <math.h>
 #include <esp_timer.h>
+#include <driver/i2s.h>
 
 // ---------------------------------------------------------------------------
 // This component is a deliberately "dumb terminal": there is NO VOX, NLMS,
@@ -42,8 +43,31 @@ static constexpr UBaseType_t TASK_PRIO_NETWORK = 5;
 void IntercomRemote::setup() {
   analogReadResolution(12);
   analogSetPinAttenuation(mic_pin_, ADC_11db);
-  pinMode(dac_pin_, OUTPUT);
-  dacWrite(dac_pin_, 128);  // rest at mid-scale (silence)
+
+  // Playback out is I2S -> MAX98357A now (was DAC -> LM386). The amp's SD
+  // pin still goes through amp_enable_ below, unchanged — MAX98357A's
+  // shutdown pin is just another logic-level output, same as the old
+  // transistor's base was.
+  i2s_config_t i2s_config = {
+      .mode = (i2s_mode_t) (I2S_MODE_MASTER | I2S_MODE_TX),
+      .sample_rate = sample_rate_,
+      .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+      .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+      .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+      .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+      .dma_buf_count = 4,
+      .dma_buf_len = 256,
+      .use_apll = false,
+  };
+  i2s_driver_install(I2S_NUM_0, &i2s_config, 0, nullptr);
+  i2s_pin_config_t pin_config = {
+      .bck_io_num = i2s_bclk_pin_,
+      .ws_io_num = i2s_lrc_pin_,
+      .data_out_num = i2s_din_pin_,
+      .data_in_num = I2S_PIN_NO_CHANGE,
+  };
+  i2s_set_pin(I2S_NUM_0, &pin_config);
+  i2s_zero_dma_buffer(I2S_NUM_0);
 
   if (amp_enable_ != nullptr) {
     amp_enable_->turn_off();
@@ -79,7 +103,8 @@ void IntercomRemote::dump_config() {
   ESP_LOGCONFIG(TAG, "  Gateway: %s:%u  |  Local RX: %u", gateway_host_.c_str(),
                 gateway_port_, local_rx_port_);
   ESP_LOGCONFIG(TAG, "  Mic: GPIO%d (bias %dmV, gain %.1f)", mic_pin_, mic_bias_mv_, input_gain_);
-  ESP_LOGCONFIG(TAG, "  DAC: GPIO%d (output gain %.2f)", dac_pin_, output_gain_);
+  ESP_LOGCONFIG(TAG, "  I2S out (MAX98357A): BCLK=GPIO%d LRC=GPIO%d DIN=GPIO%d (output gain %.2f)",
+                i2s_bclk_pin_, i2s_lrc_pin_, i2s_din_pin_, output_gain_);
   if (amp_enable_ == nullptr) {
     ESP_LOGW(TAG, "  No amp_enable configured: amplifier will stay on permanently.");
   }
@@ -95,7 +120,7 @@ void IntercomRemote::loop() { maybe_amp_off_(); }
 void IntercomRemote::set_session_active(bool on) {
   session_active_ = on;
   if (!on) {
-    dacWrite(dac_pin_, 128);
+    i2s_zero_dma_buffer(I2S_NUM_0);
     // rx_ring_ is only created in setup(), which runs at AFTER_WIFI priority
     // — later than the "Audio Active" switch's own setup(). That switch's
     // restore_mode: ALWAYS_OFF calls this at boot to enforce the initial
@@ -198,14 +223,19 @@ void IntercomRemote::capture_task_() {
 }
 
 // ---------------------------------------------------------------------------
-// Playback: rx_ring_ -> DAC. Plays back whatever the gateway sends, unfiltered.
+// Playback: rx_ring_ -> I2S -> MAX98357A. Plays back whatever the gateway
+// sends, unfiltered. I2S's own DMA/FIFO paces the output at sample_rate_ —
+// unlike the old dacWrite() loop, there's no manual per-sample timing here.
 // ---------------------------------------------------------------------------
 void IntercomRemote::playback_task_trampoline(void *arg) {
   static_cast<IntercomRemote *>(arg)->playback_task_();
 }
 
 void IntercomRemote::playback_task_() {
-  const uint32_t period_us = 1000000UL / sample_rate_;
+  // MAX98357A takes a stereo I2S stream (mixes/uses it internally); the
+  // mono mic signal is duplicated onto both channels for compatibility
+  // rather than relying on any mono-format quirk.
+  static int16_t stereo_buf[CAPTURE_FRAME_MAX * 2];
 
   for (;;) {
     size_t item_size = 0;
@@ -217,20 +247,19 @@ void IntercomRemote::playback_task_() {
 
     const int16_t *samples = static_cast<const int16_t *>(item);
     size_t count = item_size / sizeof(int16_t);
-    uint64_t next = esp_timer_get_time();
+    if (count > CAPTURE_FRAME_MAX) count = CAPTURE_FRAME_MAX;
 
     for (size_t i = 0; i < count; i++) {
-      int v = 128 + (int) ((samples[i] / 256.0f) * output_gain_);
-      if (v < 0) v = 0;
-      if (v > 255) v = 255;
-      dacWrite(dac_pin_, v);
-
-      next += period_us;
-      int64_t wait = (int64_t) next - (int64_t) esp_timer_get_time();
-      if (wait > 0) ets_delay_us((uint32_t) wait);
-
-      if ((i & 0x3F) == 0) taskYIELD();
+      float scaled = samples[i] * output_gain_;
+      if (scaled > 32767.f) scaled = 32767.f;
+      if (scaled < -32768.f) scaled = -32768.f;
+      int16_t v = (int16_t) scaled;
+      stereo_buf[2 * i] = v;
+      stereo_buf[2 * i + 1] = v;
     }
+
+    size_t bytes_written = 0;
+    i2s_write(I2S_NUM_0, stereo_buf, count * 2 * sizeof(int16_t), &bytes_written, portMAX_DELAY);
 
     vRingbufferReturnItem(rx_ring_, item);
   }
@@ -298,7 +327,7 @@ void IntercomRemote::maybe_amp_off_() {
   if (millis() - last_rx_sample_ms_ > amp_idle_timeout_ms_) {
     amp_enable_->turn_off();
     amp_on_ = false;
-    dacWrite(dac_pin_, 128);
+    i2s_zero_dma_buffer(I2S_NUM_0);
   }
 }
 

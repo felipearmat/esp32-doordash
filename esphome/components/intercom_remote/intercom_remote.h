@@ -37,7 +37,9 @@ class IntercomRemote : public Component {
   float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
 
   void set_microphone_pin(int pin) { mic_pin_ = pin; }
-  void set_dac_pin(int pin) { dac_pin_ = pin; }
+  void set_i2s_bclk_pin(int pin) { i2s_bclk_pin_ = pin; }
+  void set_i2s_lrc_pin(int pin) { i2s_lrc_pin_ = pin; }
+  void set_i2s_din_pin(int pin) { i2s_din_pin_ = pin; }
   void set_endpoint(const std::string &v) { endpoint_ = v; }
   void set_gateway_host(const std::string &v) { gateway_host_ = v; }
   void set_gateway_port(uint16_t v) { gateway_port_ = v; }
@@ -63,7 +65,9 @@ class IntercomRemote : public Component {
  protected:
   // ---- Configuration (set in setup() from the YAML) ----
   int mic_pin_{34};
-  int dac_pin_{25};
+  int i2s_bclk_pin_{26};
+  int i2s_lrc_pin_{25};
+  int i2s_din_pin_{33};
   std::string endpoint_{"A"};
   std::string gateway_host_;
   uint16_t gateway_port_{6055};

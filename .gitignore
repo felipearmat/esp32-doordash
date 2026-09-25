@@ -1,2 +1,12 @@
 .claude/
 esphome/secrets.yaml
+
+# Circuit design work (PCB/schematic sources + renders) and published
+# artifact sources are kept local-only, not part of this project's repo —
+# only the logic/config/components decisions they inform belong in
+# docs/HARDWARE.md.
+docs/pcb-module-a-main/
+docs/pcb-standalone-amp-switch/
+docs/pcb-standalone-gate-lock/
+docs/artifact-src/
+docs/.DS_Store
